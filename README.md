@@ -5,31 +5,32 @@ This repository provides a Python-based command-line application to manage and t
 
 
 Features
-Portfolio Management
 
+1.Portfolio Management
 Store ticker symbols, number of shares, and average cost in a local SQLite database (portfolio.db).
 Supports both traditional stocks (e.g., AAPL, NVDA) and cryptocurrencies (via a custom mapping to Yahoo Finance tickers, e.g., ETH -> ETH-USD).
 Automated Price Updates
 
-Fetches historical or latest prices from Yahoo Finance.
+2.Fetches historical or latest prices from Yahoo Finance.
 Merges fetched prices with your portfolio data to calculate daily valuations.
 Gain/Loss and Percentage Allocation
 
-Calculates each position’s share of the total portfolio.
+3.Calculates each position’s share of the total portfolio.
 Computes PnL (profit and loss) amounts and percentages for each holding.
 State Management
 
-Uses tracker_state.json to store the last run date, so it won’t repeatedly fetch the same data.
+4.Uses tracker_state.json to store the last run date, so it won’t repeatedly fetch the same data.
 Keeps track of available funds (cash balance) between sessions.
 Command-Line Interface
 
-Provides commands for transactions (buy/sell), re-running the tracker, importing new portfolios, and exporting data.
+5.Provides commands for transactions (buy/sell), re-running the tracker, importing new portfolios, and exporting data.
 A simple menu-driven system that sets a 30-second timeout to avoid hanging.
 Aggregate and Historical Data
 
-Daily snapshots of your portfolio are stored in aggregate_portfolio.db.
+6.Daily snapshots of your portfolio are stored in aggregate_portfolio.db.
 Historical price data is saved in price_data.db, avoiding repeated downloads from Yahoo Finance.
 Directory and File Structure
+
 
 your-project/
 │
@@ -57,22 +58,17 @@ Initialization
 
 RetailTracker loads the current state from tracker_state.json, including your last render time and available cash balance.
 Loading Portfolio
-
-On startup, the tracker reads portfolio.db to load your portfolio of tickers, shares, and average prices.
+  On startup, the tracker reads portfolio.db to load your portfolio of tickers, shares, and average prices.
 If you have a new CSV or Excel file with updated holdings, you can import it (see the import command).
 Aggregating Portfolio Data
-
-A snapshot of your holdings is stored daily in aggregate_portfolio.db. This allows you to track changes day by day.
+  A snapshot of your holdings is stored daily in aggregate_portfolio.db. This allows you to track changes day by day.
 Fetching Prices
-
-The tracker queries Yahoo Finance (via yfinance) to get recent or historical price data for each ticker in your portfolio.
+  The tracker queries Yahoo Finance (via yfinance) to get recent or historical price data for each ticker in your portfolio.
 The fetched data is merged into a single DataFrame (expanded_df), which is saved to price_data.db.
 Calculations
-
-For each day, the tracker calculates total portfolio value, each position’s percentage weight, and profit/loss relative to average cost.
+  For each day, the tracker calculates total portfolio value, each position’s percentage weight, and profit/loss relative to average cost.
 State Saving
-
-Once the update completes, the code writes the current date/time and your updated available cash balance back to tracker_state.json.
+  Once the update completes, the code writes the current date/time and your updated available cash balance back to tracker_state.json.
 This prevents unnecessary re-fetches if you run the script multiple times per day.
 
 
@@ -94,8 +90,6 @@ pip install -r requirements.txt
 If you don’t already have a portfolio.db, you can create one via the import command or simply let the script create an empty database and insert data via transactions.
 Running the Tracker
 Execute:
-
-
 python retailPortfolioTracker3.0.py
 On first run, it will:
 Check if portfolio.db exists; if not, it will complain or create an empty DB.
@@ -115,14 +109,10 @@ transaction
 Prompts: Enter transaction (format: BUY/SELL ticker price share [YYYY/MM/DD])
 
 Example:
-
-
 BUY AAPL 150 10
 This buys 10 shares of AAPL at $150 per share using your available funds.
 If you omit the date, it defaults to today’s date.
 You can also do:
-
-
 SELL NVDA 250 5 2025/03/19
 to sell 5 shares of NVDA at $250 on March 19, 2025.
 
@@ -196,21 +186,17 @@ avg_price (REAL)
 Troubleshooting
 No Data in Portfolio
 
-If you haven’t added any positions, or your portfolio.db is empty, the script may complain about missing data. Use the transaction or import command to populate it.
+  If you haven’t added any positions, or your portfolio.db is empty, the script may complain about missing data. Use the transaction or import command to populate it.
 Insufficient Funds
-
-If you get an error during a BUY transaction, you may not have enough available_fund. Either SELL something first or manually edit the available_balance in tracker_state.json if you want to simulate adding more cash.
+  If you get an error during a BUY transaction, you may not have enough available_fund. Either SELL something first or manually edit the available_balance in tracker_state.json if you want to simulate adding more cash.
 Yahoo Finance Ticker Not Found
-
-If a ticker is invalid or not supported by Yahoo Finance, you may see a warning about no price data. Double-check the spelling, or add a mapping to self.crypto_map if it’s a cryptocurrency.
+  If a ticker is invalid or not supported by Yahoo Finance, you may see a warning about no price data. Double-check the spelling, or add a mapping to self.crypto_map if it’s a cryptocurrency.
 Date Issues
-
-If you see errors about date formatting, ensure you use YYYY/MM/DD. For example, 2025/03/19.
+  If you see errors about date formatting, ensure you use YYYY/MM/DD. For example, 2025/03/19.
 Timeout
-
-The CLI has a 30-second input timeout. If you don’t type a command within 30 seconds, it will exit automatically.
+  The CLI has a 30-second input timeout. If you don’t type a command within 30 seconds, it will exit automatically.
 License
-This project is licensed under the MIT License. You are free to use, modify, and distribute this code in personal or commercial projects, provided you include the original license.
+  This project is licensed under the MIT License. You are free to use, modify, and distribute this code in personal or commercial projects, provided you include the original license.
 
 Thank you for using the Retail Portfolio Tracker!
 
