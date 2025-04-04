@@ -92,6 +92,7 @@ class RetailTracker:
 
     # ----- Database Persistence Methods -----
     def save_to_db(self):
+        print(self.expanded_df[self.expanded_df['ticker'=='SQQQ']])
         if self.expanded_df is None or self.expanded_df.empty:
             print("[ERROR] No data to save to database.")
             return False
