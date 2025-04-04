@@ -95,7 +95,6 @@ class RetailTracker:
     def save_to_db(self):
         import os, sqlite3, pandas as pd, datetime
 
-        # Check that expanded_df is available.
         if self.expanded_df is None or self.expanded_df.empty:
             print("[INFO] No data available in expanded_df to save.")
             return
@@ -400,6 +399,31 @@ class RetailTracker:
 
         return self.expanded_df
 
+    def print_top_gainers_and_losers(self):
+        current_date_str = datetime.datetime.now().date().isoformat()
+        query_gainers = f"""
+            SELECT ticker, ((price - avg_price) * share) as pnl
+            FROM expanded_df
+            WHERE date = '{current_date_str}'
+            ORDER BY pnl DESC
+            LIMIT 3;
+        """
+        with sqlite3.connect(self.DB_FILE) as conn:
+            top_gainers = pd.read_sql(query_gainers, conn)
+        query_losers = f"""
+            SELECT ticker, ((price - avg_price) * share) as pnl
+            FROM expanded_df
+            WHERE date = '{current_date_str}'
+            ORDER BY pnl ASC
+            LIMIT 3;
+        """
+        with sqlite3.connect(self.DB_FILE) as conn:
+            top_losers = pd.read_sql(query_losers, conn)
+        print(f"Top 3 Gainers for {current_date_str}:")
+        print(top_gainers)
+        print(f"Top 3 Losers for {current_date_str}:")
+        print(top_losers)
+
     def run_tracker_without_statecheck(self):
         # Load current portfolio data.
         self.load_portfolio_data()
@@ -415,7 +439,45 @@ class RetailTracker:
 
         print(f"Tracker successfully updated on {self.state_manager.last_render_time.date()}")
         print("Total amount per day:", self.total_amount)
+        self.print_top_gainers_and_losers()
         return self.expanded_df
+
+class UtilManager:
+    def __init__(self, tracker, admin_password="admin123"):
+        self.tracker = tracker
+        self.admin_password = admin_password
+
+    def execute_util_command(self):
+        password = input("Enter admin password: ").strip()
+        if password != self.admin_password:
+            print("Incorrect password.")
+            return
+        table = input("Enter table name (portfolio, aggregate_portfolio, expanded_df): ").strip()
+        table_to_db = {
+            "portfolio": self.tracker.PORTFOLIO_FILE,
+            "aggregate_portfolio": self.tracker.AGGREGATE_PORTFOLIO_FILE,
+            "expanded_df": self.tracker.DB_FILE
+        }
+        if table not in table_to_db:
+            print("Invalid table name.")
+            return
+        db_file = table_to_db[table]
+        sql_command = input("Enter SQL command: ").strip()
+        # Remove trailing semicolon if present to prevent incomplete input errors.
+        if sql_command.endswith(";"):
+            sql_command = sql_command[:-1]
+        with sqlite3.connect(db_file) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(sql_command)
+                if sql_command.lstrip().upper().startswith("SELECT"):
+                    df = pd.read_sql_query(sql_command, conn)
+                    print(df)
+                else:
+                    conn.commit()
+                    print("SQL command executed successfully.")
+            except Exception as e:
+                print("Error executing SQL command:", e)
 
 
 # ===== Command Pattern Components =====
@@ -639,6 +701,52 @@ class ExportFileCommand(Command):
         except Exception as e:
             print(f"Error exporting file: {e}")
 
+# ----- New Command Classes -----
+class AddFundCommand(Command):
+    def __init__(self, tracker):
+        self.tracker = tracker
+
+    def execute(self):
+        try:
+            amount_str = input("Enter amount to add to available fund: ").strip()
+            amount = float(amount_str)
+            if amount <= 0:
+                print("Please enter a positive amount.")
+                return
+            self.tracker.available_fund += amount
+            self.tracker.state_manager.save_state()
+            print(f"Available fund increased. New balance: {self.tracker.available_fund}")
+        except Exception as e:
+            print(f"Error adding fund: {e}")
+
+
+class ExtractFundCommand(Command):
+    def __init__(self, tracker):
+        self.tracker = tracker
+
+    def execute(self):
+        try:
+            amount_str = input("Enter amount to extract from available fund: ").strip()
+            amount = float(amount_str)
+            if amount <= 0:
+                print("Please enter a positive amount.")
+                return
+            if amount > self.tracker.available_fund:
+                print(f"Insufficient funds. Available fund: {self.tracker.available_fund}")
+                return
+            self.tracker.available_fund -= amount
+            self.tracker.state_manager.save_state()
+            print(f"Available fund decreased. New balance: {self.tracker.available_fund}")
+        except Exception as e:
+            print(f"Error extracting fund: {e}")
+
+class UtilCommand(Command):
+    def __init__(self, tracker):
+        self.util_manager = UtilManager(tracker)
+
+    def execute(self):
+        self.util_manager.execute_util_command()
+
 
 class CommandLine:
     def __init__(self, tracker):
@@ -647,14 +755,17 @@ class CommandLine:
             "transaction": TransactionCommand(tracker),
             "rerender": RerenderCommand(tracker),
             "import": ImportPortfolioCommand(tracker),
-            "export": ExportFileCommand(tracker)
+            "export": ExportFileCommand(tracker),
+            "addFund": AddFundCommand(tracker),
+            "extractFund": ExtractFundCommand(tracker),
+            "util": UtilCommand(tracker)
         }
 
     def timeout_handler(self, signum, frame):
         raise TimeoutError
 
     def run(self):
-        print("Command Line Interface. Available commands: transaction, rerender, exit")
+        print("Command Line Interface. Available commands: transaction, rerender, exit, import, export, addFund, extractFund")
         signal.signal(signal.SIGALRM, self.timeout_handler)
         while True:
             # Set (or reset) the alarm to 60 seconds.
