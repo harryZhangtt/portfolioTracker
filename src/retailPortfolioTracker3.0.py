@@ -4,17 +4,27 @@ import json
 import sqlite3
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError  # Add this import
+import time  # Add this import for sleep functionality
 from abc import ABC, abstractmethod
 import signal
+import matplotlib.pyplot as plt
+from dataAnalysis.excess_returns import ExcessReturn
 
+"""
+need to change the logic of handling initial balance so that each entry should record balance at that time to ensure 
+accurate calcualtion
+"""
 
 # ===== State Management Component =====
 class StateManager:
-    def __init__(self, state_file="tracker_state.json"):
+    def __init__(self, state_file="database/tracker_state.json"):
         self.state_file = state_file
         self.available_balance=None
         self.last_render_time = None
         self.saved_data_path = None
+        # Ensure database directory exists
+        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
         self.load_state()
 
     def load_state(self):
@@ -46,10 +56,17 @@ class StateManager:
 
 # ===== Main RetailTracker Class =====
 class RetailTracker:
-    STATE_FILE = "tracker_state.json"
-    PORTFOLIO_FILE = "portfolio.db"
-    DB_FILE = "price_data.db"
-    AGGREGATE_PORTFOLIO_FILE = "aggregate_portfolio.db"
+    # Update file paths to use database directory
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATABASE_DIR = os.path.join(os.path.dirname(BASE_DIR), "database")
+    
+    # Make sure the database directory exists
+    os.makedirs(DATABASE_DIR, exist_ok=True)
+    
+    STATE_FILE = os.path.join(DATABASE_DIR, "tracker_state.json")
+    PORTFOLIO_FILE = os.path.join(DATABASE_DIR, "portfolio.db")
+    DB_FILE = os.path.join(DATABASE_DIR, "price_data.db")
+    AGGREGATE_PORTFOLIO_FILE = os.path.join(DATABASE_DIR, "aggregate_portfolio.db")
 
 
     def __init__(self):
@@ -67,6 +84,7 @@ class RetailTracker:
             "Sui": "SUI20947-USD",
             "Trump": "TRUMP-OFFICIAL-USD",
             "ADA": "ADA-USD",
+            'XRP': 'XRP-USD',
         }
 
     # ----- Property Methods -----
@@ -327,7 +345,10 @@ class RetailTracker:
 
     def update_price_db(self):
         # Determine the date range: from last render time to current date.
-        last_time = self.state_manager.last_render_time.date()
+        if self.state_manager.last_render_time is None:
+            last_time = datetime.datetime.now().date()
+        else:
+            last_time = self.state_manager.last_render_time.date()
         current_date = datetime.datetime.now().date()
 
         # Fetch the aggregated portfolio rows for the date range.
@@ -359,7 +380,29 @@ class RetailTracker:
             start_str = start.strftime("%Y-%m-%d")
             # Extend end date by one day to include the intended date.
             end_str = (end).strftime("%Y-%m-%d")
-            hist = ticker.history(start=start_str, end=end_str, interval='1d')
+            
+            # Add retry mechanism with exponential backoff
+            max_retries = 5
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    hist = ticker.history(start=start_str, end=end_str, interval='1d')
+                    break  # Exit the retry loop if successful
+                except YFRateLimitError:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"Failed to fetch data for {ticker_str} after {max_retries} retries.")
+                        group['price'] = None
+                        return group
+                    
+                    wait_time = 2 ** retry_count  # Exponential backoff
+                    print(f"Rate limit hit for {ticker_str}. Retrying in {wait_time} seconds... ({retry_count}/{max_retries})")
+                    time.sleep(wait_time)
+                except Exception as e:
+                    print(f"Error fetching data for {ticker_str}: {e}")
+                    group['price'] = None
+                    return group
 
             if hist.empty:
                 print(f"[WARNING] No price data for {ticker_str} between {start_str} and {end_str}")
@@ -385,14 +428,11 @@ class RetailTracker:
         expanded_df = expanded_df.groupby('ticker', group_keys=False).apply(
             lambda g: fetch_for_ticker(g, last_time, current_date))
 
-
-
         # Update the in-memory expanded_df.
         self.expanded_df = expanded_df.copy()
         # Recalculate portfolio distribution and PnL with the new price data.
         self.calculate_portfolio_distribution()
         self.calculate_pnl()
-
 
         # Save the updated expanded DataFrame to the database.
         self.save_to_db()
@@ -748,6 +788,98 @@ class UtilCommand(Command):
         self.util_manager.execute_util_command()
 
 
+class ExcessReturnCommand(Command):
+    def __init__(self, tracker):
+        self.tracker = tracker
+
+    def execute(self):
+        print("Executing Excess Return Analysis...")
+        
+        # Get tickers from the portfolio
+        try:
+            with sqlite3.connect(self.tracker.PORTFOLIO_FILE) as conn:
+                df_portfolio = pd.read_sql("SELECT ticker FROM portfolio", conn)
+                tickers = df_portfolio['ticker'].tolist()
+        except Exception as e:
+            print(f"Error fetching portfolio tickers: {e}")
+            tickers = []
+            
+        if not tickers:
+            print("No tickers found in portfolio. Please add some stocks/assets first.")
+            return
+            
+        # Allow user to specify a different benchmark
+        benchmark = input(f"Enter benchmark ticker (default: ^IXIC for NASDAQ): ").strip() or "^IXIC"
+        
+        # Allow user to specify a custom date range
+        days_str = input("Enter number of days to analyze (default: 100): ").strip() or "100"
+        try:
+            days = int(days_str)
+        except ValueError:
+            print("Invalid days value. Using default 100 days.")
+            days = 100
+            
+        end_date = datetime.datetime.now()
+        start_date = end_date - datetime.timedelta(days=days)
+        
+        print(f"Running analysis for {len(tickers)} tickers from {start_date.date()} to {end_date.date()}...")
+        
+        # Create a plot directory in the root of RetailPortfolioTracking
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        plot_dir = os.path.join(root_dir, "plot")
+        os.makedirs(plot_dir, exist_ok=True)
+        
+        # Create a specific folder for this analysis with date in name
+        current_date = datetime.datetime.now().strftime('%Y%m%d')
+        analysis_dir = os.path.join(plot_dir, f"{current_date}_excessive")
+        os.makedirs(analysis_dir, exist_ok=True)
+        
+        try:
+            # Set timeout to None to prevent SIGALRM from interfering with analysis
+            old_alarm = signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.alarm(0)  # Cancel any existing alarm
+            
+            # Create analyzer with plot_immediately=False to avoid blocking
+            analyzer = ExcessReturn(
+                tickers, 
+                start_date=start_date, 
+                end_date=end_date, 
+                benchmark=benchmark,
+                db_file=self.tracker.DB_FILE,
+                plot_dir=analysis_dir,
+                plot_immediately=False  # Turn off automatic plotting
+            )
+            
+            # Explicitly call plotting methods with show=False
+            print(f"Generating plots in {analysis_dir}...")
+            analyzer.plot_excess_returns(save=True, show=False)
+            analyzer.plot_cumulative_excess(save=True, show=False)
+            
+            # Get and display summary statistics
+            stats = analyzer.get_summary_stats()
+            if stats is not None:
+                # Ask if user wants to export stats to CSV
+                export = input("Export summary statistics to CSV? (y/n): ").strip().lower()
+                if export == 'y':
+                    try:
+                        csv_path = os.path.join(analysis_dir, f"excess_returns_{current_date}.csv")
+                        stats.to_csv(csv_path, index=False)
+                        print(f"Statistics exported to {csv_path}")
+                    except Exception as e:
+                        print(f"Error exporting statistics: {e}")
+                        
+            print("\nAnalysis complete. Plots saved in the 'plot' directory.")
+        except Exception as e:
+            print(f"Error during analysis: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Close all matplotlib figures to free resources
+            plt.close('all')
+            # Restore the original signal handler and reset the alarm
+            signal.signal(signal.SIGALRM, old_alarm)
+
+
 class CommandLine:
     def __init__(self, tracker):
         self.tracker = tracker
@@ -758,37 +890,62 @@ class CommandLine:
             "export": ExportFileCommand(tracker),
             "addFund": AddFundCommand(tracker),
             "extractFund": ExtractFundCommand(tracker),
-            "util": UtilCommand(tracker)
+            "util": UtilCommand(tracker),
+            "analyze": ExcessReturnCommand(tracker)
         }
 
     def timeout_handler(self, signum, frame):
         raise TimeoutError
 
     def run(self):
-        print("Command Line Interface. Available commands: transaction, rerender, exit, import, export, addFund, extractFund")
+        print("Command Line Interface. Available commands: transaction, rerender, exit, import, export, addFund, extractFund, analyze")
         signal.signal(signal.SIGALRM, self.timeout_handler)
+        
         while True:
-            # Set (or reset) the alarm to 60 seconds.
-            signal.alarm(30)
             try:
-                cmd = input("Command> ").strip()
+                # Set alarm for 30 seconds
+                signal.alarm(30)
+                print("\nCommand> ", end='', flush=True)
+                cmd = input().strip()
+                
+                # Immediately reset the alarm to avoid timeout during command execution
+                signal.alarm(0)
+                
+                if cmd == "exit":
+                    print("Exiting command line.")
+                    break
+                elif cmd in self.commands:
+                    try:
+                        self.commands[cmd].execute()
+                    except Exception as e:
+                        print(f"Error executing command {cmd}: {e}")
+                    finally:
+                        # Make sure matplotlib doesn't keep any windows open
+                        plt.close('all')
+                        
+                    print("\nCommand completed. Ready for next command.")
+                else:
+                    print("Unknown command. Please try again.")
+                
+                # Reset the alarm after command execution is complete
+                signal.alarm(30)
             except TimeoutError:
-                print("No command received in 30 seconds. Terminating command line.")
+                print("\nNo command received in 30 seconds. Terminating command line.")
                 break
-
-            # Reset the alarm after a command is received (starting the countdown anew).
-            signal.alarm(30)
-
-            if cmd == "exit":
-                print("Exiting command line.")
-                break
-            elif cmd in self.commands:
-                self.commands[cmd].execute()
-            else:
-                print("Unknown command. Please try again.")
+            except KeyboardInterrupt:
+                print("\nCommand interrupted. Returning to command prompt.")
+                signal.alarm(30)  # Reset the alarm after an interruption
+            except Exception as e:
+                print(f"\nUnexpected error: {e}")
+                signal.alarm(30)  # Reset the alarm after any error
 
 
 if __name__ == "__main__":
+    # Make sure the src and database directories exist
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    database_dir = os.path.join(os.path.dirname(src_dir), "database")
+    os.makedirs(database_dir, exist_ok=True)
+    
     tracker = RetailTracker()
     tracker.run_tracker()
     cli = CommandLine(tracker)
