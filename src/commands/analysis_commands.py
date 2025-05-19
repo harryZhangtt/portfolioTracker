@@ -32,16 +32,43 @@ class ExcessReturnCommand(Command):
         # Allow user to specify a different benchmark
         benchmark = input(f"Enter benchmark ticker (default: ^IXIC for NASDAQ): ").strip() or "^IXIC"
         
-        # Allow user to specify a custom date range
+        # Get user's preference for date range
         days_str = input("Enter number of days to analyze (default: 100): ").strip() or "100"
         try:
             days = int(days_str)
         except ValueError:
             print("Invalid days value. Using default 100 days.")
             days = 100
-            
+        
+        # Default date range based on user preference
         end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=days)
+        default_start_date = end_date - datetime.timedelta(days=days)
+        
+        # Determine actual date range based on aggregate portfolio data
+        start_date = default_start_date
+        
+        # Check aggregate portfolio for earliest dates of these tickers
+        try:
+            with sqlite3.connect(self.tracker.AGGREGATE_PORTFOLIO_FILE) as conn:
+                # Get the earliest date any of these tickers appears in the aggregate portfolio
+                placeholders = ','.join(['?'] * len(tickers))
+                query = f"""
+                    SELECT MIN(aggregated_date) as earliest_date
+                    FROM aggregate_portfolio
+                    WHERE ticker IN ({placeholders})
+                """
+                df_dates = pd.read_sql_query(query, conn, params=tickers)
+                
+                if not df_dates.empty and df_dates['earliest_date'].iloc[0] is not None:
+                    earliest_date = datetime.datetime.fromisoformat(df_dates['earliest_date'].iloc[0])
+                    # Use the later of the default start date or earliest portfolio date
+                    # This ensures we don't try to fetch data from before the ticker was in portfolio
+                    if earliest_date > default_start_date:
+                        start_date = earliest_date
+                    print(f"Using start date: {start_date.date()} based on portfolio history")
+        except Exception as e:
+            print(f"Error checking aggregate portfolio for dates: {e}")
+            print(f"Falling back to default date range of {days} days")
         
         print(f"Running analysis for {len(tickers)} tickers from {start_date.date()} to {end_date.date()}...")
         
