@@ -15,7 +15,7 @@ class ExcessReturn:
     """
 
     def __init__(self, tickers, start_date=None, end_date=None, benchmark='^IXIC', ticker_names=None, 
-                 db_file=None, plot_immediately=True, plot_dir=None):
+                 db_file=None, plot_immediately=True, plot_dir=None, benchmark_map=None):
         """
         Initialize the ExcessReturn analyzer with tickers and date range.
         
@@ -23,11 +23,12 @@ class ExcessReturn:
             tickers (list): List of ticker symbols to analyze
             start_date (str or datetime): Start date for analysis, defaults to 1 year ago
             end_date (str or datetime): End date for analysis, defaults to today
-            benchmark (str): Ticker symbol for the benchmark, defaults to NASDAQ (^IXIC)
+            benchmark (str): Default ticker symbol for the benchmark, defaults to NASDAQ (^IXIC)
             ticker_names (dict): Dictionary mapping ticker symbols to display names
             db_file (str): Path to SQLite database with price data
             plot_immediately (bool): Whether to plot charts immediately after processing data
             plot_dir (str): Directory to save plots to, defaults to PROJECT_ROOT/plot/
+            benchmark_map (dict): Dictionary mapping ticker symbols to their benchmarks
         """
         # Set up date range
         if end_date is None:
@@ -55,11 +56,20 @@ class ExcessReturn:
         # Ensure plot directory exists
         os.makedirs(self.plot_dir, exist_ok=True)
         
-        # Ensure benchmark is included in tickers list
+        # Store benchmark mapping
+        self.benchmark_map = benchmark_map or {}
+        self.default_benchmark = benchmark
+        
+        # Ensure all benchmarks are included in tickers list
         self.tickers = list(tickers)
-        self.benchmark = benchmark
         if benchmark not in self.tickers:
             self.tickers.append(benchmark)
+            
+        # Add all benchmarks from the mapping to the tickers list
+        all_benchmarks = set(self.benchmark_map.values())
+        for bench in all_benchmarks:
+            if bench not in self.tickers:
+                self.tickers.append(bench)
             
         # Set up ticker names for display
         self.ticker_names = ticker_names or {}
@@ -240,11 +250,11 @@ class ExcessReturn:
             print(f"Date range: {self.data.index.min()} to {self.data.index.max()}")
             
             # Check if benchmark is available
-            if self.benchmark not in self.data.columns:
-                print(f"Warning: Benchmark {self.benchmark} not available in dataset.")
+            if self.default_benchmark not in self.data.columns:
+                print(f"Warning: Benchmark {self.default_benchmark} not available in dataset.")
                 if len(self.available_tickers) > 0:
                     print(f"Using {self.available_tickers[0]} as benchmark instead.")
-                    self.benchmark = self.available_tickers[0]
+                    self.default_benchmark = self.available_tickers[0]
                 else:
                     return False
                     
@@ -302,26 +312,33 @@ class ExcessReturn:
                     base_value = self.normalized_data.loc[first_valid, ticker]
                     self.normalized_data[ticker] = self.normalized_data[ticker] / base_value * 100
         
-        # Calculate excess returns compared to benchmark
-        if self.benchmark in self.aligned_data.columns:
-            # Fix for FutureWarning in pct_change
-            benchmark_returns = self.aligned_data[self.benchmark].pct_change(fill_method=None).dropna()
+        # Calculate excess returns compared to appropriate benchmark for each ticker
+        self.excess_returns = {}
+        for ticker in self.aligned_data.columns:
+            # Skip processing benchmarks as assets
+            if ticker in set(self.benchmark_map.values()) or ticker == self.default_benchmark:
+                continue
+                
+            # Determine which benchmark to use for this ticker
+            ticker_benchmark = self.benchmark_map.get(ticker, self.default_benchmark)
             
-            # Calculate excess returns for each asset
-            self.excess_returns = {}
-            for ticker in self.aligned_data.columns:
-                if ticker != self.benchmark:
-                    # Fix for FutureWarning in pct_change
-                    asset_returns = self.aligned_data[ticker].pct_change(fill_method=None).dropna()
-                    # Align the index for proper calculation
-                    common_idx = asset_returns.index.intersection(benchmark_returns.index)
-                    if len(common_idx) > 0:
-                        excess = asset_returns[common_idx] - benchmark_returns[common_idx]
-                        self.excess_returns[ticker] = {
-                            'mean': excess.mean(),
-                            'cumulative': (1 + excess).cumprod() - 1,
-                            'values': excess
-                        }
+            if ticker_benchmark in self.aligned_data.columns:
+                # Fix for FutureWarning in pct_change
+                benchmark_returns = self.aligned_data[ticker_benchmark].pct_change(fill_method=None).dropna()
+                
+                # Calculate excess returns for this asset
+                asset_returns = self.aligned_data[ticker].pct_change(fill_method=None).dropna()
+                
+                # Align the index for proper calculation
+                common_idx = asset_returns.index.intersection(benchmark_returns.index)
+                if len(common_idx) > 0:
+                    excess = asset_returns[common_idx] - benchmark_returns[common_idx]
+                    self.excess_returns[ticker] = {
+                        'mean': excess.mean(),
+                        'cumulative': (1 + excess).cumprod() - 1,
+                        'values': excess,
+                        'benchmark': ticker_benchmark  # Store which benchmark was used
+                    }
         
         return True
 
@@ -338,14 +355,20 @@ class ExcessReturn:
         Returns:
             str: Path to saved plot file if save=True, otherwise None
         """
-        if self.normalized_data is None or self.benchmark not in self.normalized_data.columns:
-            print("No normalized data or benchmark available.")
+        if self.normalized_data is None:
+            print("No normalized data available.")
             return None
             
         try:
-            # Include benchmark in the count, as it gets its own plot
-            num_tickers = len(self.available_tickers)
-            # Calculate rows based on all tickers (not excluding benchmark)
+            # Filter out benchmarks from being plotted as assets
+            benchmarks_set = set(self.benchmark_map.values())
+            if self.default_benchmark not in benchmarks_set:
+                benchmarks_set.add(self.default_benchmark)
+                
+            plot_tickers = [t for t in self.available_tickers if t not in benchmarks_set]
+            
+            # Calculate rows and cols for the plot
+            num_tickers = len(plot_tickers)
             rows = (num_tickers + max_cols - 1) // max_cols
             
             # Create figure with calculated dimensions; adjust height based on row count
@@ -354,22 +377,22 @@ class ExcessReturn:
             
             plot_index = 0
             
-            # First plot all non-benchmark tickers
-            for ticker in self.available_tickers:
-                if ticker == self.benchmark:
-                    continue  # We'll handle the benchmark separately at the end
-                    
+            # Plot each ticker with its appropriate benchmark
+            for ticker in plot_tickers:
                 if plot_index < len(axes):
-                    # Get the data
+                    # Get the data for this asset
                     asset_data = self.normalized_data[ticker]
-                    benchmark_data = self.normalized_data[self.benchmark]
+                    
+                    # Determine which benchmark to use
+                    ticker_benchmark = self.benchmark_map.get(ticker, self.default_benchmark)
+                    benchmark_data = self.normalized_data[ticker_benchmark]
                     
                     # Plot both lines
                     axes[plot_index].plot(asset_data, linewidth=2, color='black', 
                                         label=self.ticker_names.get(ticker, ticker))
                     axes[plot_index].plot(benchmark_data, linewidth=1.5, color='blue', 
                                         linestyle='--', alpha=0.7, 
-                                        label=f"{self.ticker_names.get(self.benchmark, self.benchmark)} (Benchmark)")
+                                        label=f"{self.ticker_names.get(ticker_benchmark, ticker_benchmark)} (Benchmark)")
                     
                     # Fill areas between curves segment by segment
                     for j in range(len(asset_data)-1):
@@ -391,18 +414,20 @@ class ExcessReturn:
                                     color='red', alpha=0.3
                                 )
                     
-                    # Add annotation about excess return in the upper right corner
+                    # Add annotation about excess return and which benchmark was used
                     if ticker in self.excess_returns:
                         excess_mean = self.excess_returns[ticker]['mean']
+                        used_benchmark = self.excess_returns[ticker]['benchmark']
+                        benchmark_name = self.ticker_names.get(used_benchmark, used_benchmark)
+                        
                         is_outperforming = excess_mean > 0
                         performance = "Outperforming" if is_outperforming else "Underperforming"
-                        excessive_text = f"{performance} Benchmark\nExcess Return: {excess_mean:.2%}"
+                        excessive_text = f"{performance} {benchmark_name}\nExcess Return: {excess_mean:.2%}"
                         
                         # Calculate font size based on figure size
-                        # As figure gets larger, font size increases, but at a slower rate
                         font_size = max(8, min(11, figsize[0] / 2))
                         
-                        # Position the annotation in top right to avoid blocking view
+                        # Position the annotation in top right
                         axes[plot_index].annotate(
                             excessive_text, 
                             xy=(0.95, 0.95), xycoords='axes fraction', 
@@ -419,18 +444,6 @@ class ExcessReturn:
                     axes[plot_index].legend(loc='upper left')
                     
                     plot_index += 1
-            
-            # Now add the benchmark as its own plot if there's space
-            if plot_index < len(axes) and self.benchmark in self.normalized_data.columns:
-                axes[plot_index].plot(self.normalized_data[self.benchmark], linewidth=2, color='blue', 
-                                   label=self.ticker_names.get(self.benchmark, self.benchmark))
-                axes[plot_index].set_title(
-                    f"{self.ticker_names.get(self.benchmark, self.benchmark)} ({self.benchmark}) - BENCHMARK"
-                )
-                axes[plot_index].set_ylabel('Normalized Price (100 = Start)')
-                axes[plot_index].grid(True, alpha=0.3)
-                axes[plot_index].legend(loc='upper left')
-                plot_index += 1
             
             # Remove any empty subplots
             for i in range(plot_index, len(axes)):
@@ -491,18 +504,43 @@ class ExcessReturn:
         try:
             fig, ax = plt.subplots(figsize=figsize)
             
-            # Plot cumulative excess returns for each ticker
+            # Group tickers by their benchmark for better visualization
+            benchmark_groups = {}
             for ticker, data in self.excess_returns.items():
-                if 'cumulative' in data:
-                    cumulative = data['cumulative']
-                    ax.plot(cumulative.index, cumulative.values * 100, 
-                          label=f"{self.ticker_names.get(ticker, ticker)} ({ticker})")
+                benchmark = data['benchmark']
+                if benchmark not in benchmark_groups:
+                    benchmark_groups[benchmark] = []
+                benchmark_groups[benchmark].append(ticker)
+            
+            # Use different line styles for each benchmark group
+            line_styles = ['-', '--', '-.', ':']
+            colors = plt.cm.tab10.colors
+            
+            # Plot each benchmark group with distinct styles
+            for i, (benchmark, ticker_group) in enumerate(benchmark_groups.items()):
+                benchmark_name = self.ticker_names.get(benchmark, benchmark)
+                line_style = line_styles[i % len(line_styles)]
+                
+                # Plot each ticker in this benchmark group
+                for j, ticker in enumerate(ticker_group):
+                    data = self.excess_returns[ticker]
+                    color = colors[(i*len(ticker_group) + j) % len(colors)]
+                    if 'cumulative' in data:
+                        cumulative = data['cumulative']
+                        label = f"{self.ticker_names.get(ticker, ticker)} (vs. {benchmark_name})"
+                        ax.plot(cumulative.index, cumulative.values * 100, 
+                              label=label, linestyle=line_style, color=color)
             
             ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
             ax.grid(True, alpha=0.3)
-            ax.set_title('Cumulative Excess Return vs. Benchmark')
+            ax.set_title('Cumulative Excess Return vs. Respective Benchmarks')
             ax.set_ylabel('Excess Return (%)')
-            ax.legend()
+            
+            # Add legend with smaller font size and better placement
+            if len(self.excess_returns) > 10:
+                ax.legend(fontsize='small', loc='upper left', bbox_to_anchor=(1, 1))
+            else:
+                ax.legend(loc='best')
             
             plt.tight_layout()
             
@@ -542,6 +580,10 @@ class ExcessReturn:
         stats = []
         
         for ticker in self.available_tickers:
+            # Skip benchmarks
+            if ticker in set(self.benchmark_map.values()) or ticker == self.default_benchmark:
+                continue
+                
             if ticker in self.aligned_data.columns:
                 # Fix for FutureWarning in pct_change
                 returns = self.aligned_data[ticker].pct_change(fill_method=None).dropna()
@@ -559,8 +601,10 @@ class ExcessReturn:
                 # Add excess returns if available
                 if ticker in self.excess_returns:
                     ticker_stats['excess_return'] = self.excess_returns[ticker]['mean'] * 100
+                    ticker_stats['benchmark'] = self.excess_returns[ticker]['benchmark']
                 else:
                     ticker_stats['excess_return'] = None
+                    ticker_stats['benchmark'] = self.benchmark_map.get(ticker, self.default_benchmark)
                     
                 stats.append(ticker_stats)
         
@@ -568,7 +612,7 @@ class ExcessReturn:
             df_stats = pd.DataFrame(stats)
             # Reorder columns for better display
             cols = ['ticker', 'name', 'total_return', 'annualized_return', 
-                   'volatility', 'sharpe', 'excess_return']
+                   'volatility', 'sharpe', 'excess_return', 'benchmark']
             df_stats = df_stats[[col for col in cols if col in df_stats.columns]]
             return df_stats
         
